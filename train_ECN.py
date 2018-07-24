@@ -1,6 +1,6 @@
 import tensorflow as tf
 import tensorflow.contrib.slim as slim
-from tensorflow.contrib.framework.python.ops.variables import get_or_create_global_step
+#from tensorflow.contrib.framework.python.ops.variables import get_or_create_global_step
 from tensorflow.python.platform import tf_logging as logging
 from ECN import ECN
 from preprocessing import preprocess
@@ -8,6 +8,8 @@ from get_class_weights import ENet_weighting, median_frequency_balancing
 import os
 import time
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 # ==============INPUT ARGUMENTS==================
@@ -16,20 +18,21 @@ flags = tf.app.flags
 # Directory arguments
 flags.DEFINE_string('dataset_dir', './dataset', 'The dataset directory to find the train, validation and test images.')
 flags.DEFINE_string('logdir', './log/original', 'The log directory to save your checkpoint and event files.')
+flags.DEFINE_string('bestdir', './log/original/best', 'The log directory to save best checkpoints and event files.')
 flags.DEFINE_boolean('save_images', True, 'Whether or not to save your images.')
 flags.DEFINE_boolean('combine_dataset', False, 'If True, combines the validation with the train dataset.')
 
 # Training arguments
 flags.DEFINE_integer('num_classes', 12, 'The number of classes to predict.')
-flags.DEFINE_integer('batch_size', 4, 'The batch_size for training.')
-flags.DEFINE_integer('eval_batch_size', 25, 'The batch size used for validation.')
+flags.DEFINE_integer('batch_size', 10, 'The batch_size for training.')
+flags.DEFINE_integer('eval_batch_size', 101, 'The batch size used for validation.')
 flags.DEFINE_integer('image_height', 360, "The input height of the images.")
 flags.DEFINE_integer('image_width', 480, "The input width of the images.")
-flags.DEFINE_integer('num_epochs', 500, "The number of epochs to train your model.")
-flags.DEFINE_integer('num_epochs_before_decay', 300, 'The number of epochs before decaying your learning rate.')
+flags.DEFINE_integer('num_epochs', 5000, "The number of epochs to train your model.")
+flags.DEFINE_integer('num_epochs_before_decay', 1000, 'The number of epochs before decaying your learning rate.')
 flags.DEFINE_float('weight_decay', 2e-4, "The weight decay for ENet convolution layers.")
 flags.DEFINE_float('learning_rate_decay_factor', 1e-1, 'The learning rate decay factor.')
-flags.DEFINE_float('initial_learning_rate', 5e-4, 'The initial learning rate for your training.')
+flags.DEFINE_float('initial_learning_rate', 5e-3, 'The initial learning rate for your training.')
 flags.DEFINE_string('weighting', "MFB", 'Choice of Median Frequency Balancing or the custom ENet class weights.')
 
 FLAGS = flags.FLAGS
@@ -60,6 +63,7 @@ photo_dir = os.path.join(FLAGS.logdir, "images")
 # Directories
 dataset_dir = FLAGS.dataset_dir
 logdir = FLAGS.logdir
+bestdir = FLAGS.bestdir
 
 # ===============PREPARATION FOR TRAINING==================
 # Get the images into a list
@@ -73,10 +77,14 @@ if combine_dataset:
     image_files += image_val_files
     annotation_files += annotation_val_files
 
+if not os.path.exists(bestdir):
+    os.makedirs(bestdir)
+
 #Know the number steps to take before decaying the learning rate and batches per epoch
 num_batches_per_epoch = len(image_files) / batch_size
-num_steps_per_epoch = num_batches_per_epoch
-decay_steps = int(num_epochs_before_decay * num_steps_per_epoch)
+decay_steps = int(num_epochs_before_decay * num_batches_per_epoch)
+
+num_val_batch_per_epoch = len(image_val_files) / eval_batch_size
 
 # =================CLASS WEIGHTS===============================
 # Median frequency balancing class_weights
@@ -117,7 +125,6 @@ def weighted_cross_entropy(onehot_labels, logits, class_weights):
     return loss
 
 def run():
-
     with tf.Graph().as_default() as graph:
         tf.logging.set_verbosity(tf.logging.INFO)
 
@@ -155,7 +162,7 @@ def run():
         total_loss = tf.losses.get_total_loss()
 
         # Create the global step for monitoring the learning_rate and training.
-        global_step = get_or_create_global_step()
+        global_step = tf.train.get_or_create_global_step()
 
         # Define your exponentially decaying learning rate
         lr = tf.train.exponential_decay(learning_rate=initial_learning_rate,
@@ -172,7 +179,9 @@ def run():
 
         # State the metrics that you want to predict. We get a predictions that is not one_hot_encoded.
         predictions = tf.argmax(probabilities, -1)
-        accuracy, accuracy_update = tf.contrib.metrics.streaming_accuracy(predictions, annotations)
+        #accuracy, accuracy_update = tf.contrib.metrics.streaming_accuracy(predictions, annotations)
+        accuracy, accuracy_update = tf.metrics.accuracy(labels=annotations, predictions=predictions)
+
         mean_IOU, mean_IOU_update = tf.contrib.metrics.streaming_mean_iou(predictions=predictions,
                                                                           labels=annotations,
                                                                           num_classes=num_classes)
@@ -193,10 +202,8 @@ def run():
             time_elapsed = time.time() - start_time
 
             # Run the logging to show some results
-            #logging.info('global step %s: loss: %.4f (%.2f sec/step)    Current Streaming Accuracy: %.4f    Current Mean IOU: %.4f', global_step_count, total_loss, time_elapsed, accuracy_val, mean_IOU_val)
-
             logging.info('Epoch %d / %d: Batch %d / %d: Loss: %.4f (%.2f sec/step)    Current Streaming Accuracy: %.4f    Current Mean IOU: %.4f',
-                         (global_step_count//num_batches_per_epoch) + 1, num_epochs, (global_step_count % num_batches_per_epoch)+1, num_steps_per_epoch, total_loss, time_elapsed, accuracy_val, mean_IOU_val)
+                         epoch+1, num_epochs, batch+1, num_batches_per_epoch, total_loss, time_elapsed, accuracy_val, mean_IOU_val)
 
             return total_loss, accuracy_val, mean_IOU_val
 
@@ -236,7 +243,8 @@ def run():
         # State the metrics that you want to predict.
         # We get a predictions that is not one_hot_encoded. ----> Should we use OHE instead?
         predictions_val = tf.argmax(probabilities_val, -1)
-        accuracy_val, accuracy_val_update = tf.contrib.metrics.streaming_accuracy(predictions_val, annotations_val)
+        # accuracy_val, accuracy_val_update = tf.contrib.metrics.streaming_accuracy(predictions_val, annotations_val)
+        accuracy_val, accuracy_val_update = tf.metrics.accuracy(labels=annotations_val, predictions=predictions_val)
         mean_IOU_val, mean_IOU_val_update = tf.contrib.metrics.streaming_mean_iou(predictions=predictions_val,
                                                                                   labels=annotations_val,
                                                                                   num_classes=num_classes)
@@ -258,8 +266,11 @@ def run():
             time_elapsed = time.time() - start_time
 
             # Log some information
-            logging.info('---VALIDATION--- Validation Accuracy: %.4f    Validation Mean IOU: %.4f    (%.2f sec/step)',
-                         accuracy_value, mean_IOU_value, time_elapsed)
+            sec_per_image = time_elapsed / eval_batch_size
+            fps = int(1 / sec_per_image)
+
+            logging.info('---VALIDATION--- Validation Accuracy: %.4f    Validation Mean IOU: %.4f    (%.4f sec/per image, %d FPS)',
+                         accuracy_value, mean_IOU_value, sec_per_image, fps)
 
             return accuracy_value, mean_IOU_value
 
@@ -280,38 +291,28 @@ def run():
         # Define your supervisor for running a managed session.
         # Do not run the summary_op automatically or else it will consume too much memory
         sv = tf.train.Supervisor(logdir=logdir, summary_op=None, init_fn=None)
-        # sv = tf.train.MonitoredTrainingSession(checkpoint_dir=logdir, )
 
-        best_val = 0
 
         # Run the managed session
         with sv.managed_session() as sess:
-            for step in range(int(num_steps_per_epoch * num_epochs)):
+
+            for epoch in range(num_epochs):
                 # At the start of every epoch, show the vital information:
-                if step % num_batches_per_epoch == 0:
-                    logging.info('Epoch %s/%s', step / num_batches_per_epoch + 1, num_epochs)
-                    learning_rate_value = sess.run([lr])
-                    logging.info('Current Learning Rate: %s', learning_rate_value)
+                print('---- Running Training Step ----')
+                logging.info('Epoch %s/%s', epoch+1, num_epochs)
+                logging.info('Current Learning Rate: %s', sess.run([lr]))
 
-                # Train and log summaries
-                else:
-                    loss, training_accuracy, training_mean_IOU = train_step(sess, train_op, sv.global_step,
-                                                                            metrics_op=metrics_op)
+                for batch in range(int(num_batches_per_epoch)):
 
+                    loss, training_accuracy, training_mean_IOU = train_step(sess, train_op, sv.global_step, metrics_op=metrics_op)
                     summaries = sess.run(my_summary_op)
                     sv.summary_computed(sess, summaries)
 
-                    # Check the validation data only at every third of an epoch
-                if step % num_steps_per_epoch == 0:
-                    print('---- Running Validation ----')
-                    for i in range(int(len(image_val_files) / eval_batch_size)):
-                        validation_accuracy, validation_mean_IOU = eval_step(sess, metrics_op_val)
 
-                        if validation_mean_IOU > best_val:
-                            best_val = validation_mean_IOU
-                            sv.saver.save(sess, './log/best/best_on_val', global_step=sv.global_step)
-
-
+                # Check the validation data only at every third of an epoch
+                print('---- Running Validation Step ----')
+                for batch in range(int(num_val_batch_per_epoch)):
+                    validation_accuracy, validation_mean_IOU = eval_step(sess, metrics_op_val)
 
             # We log the final training loss
             logging.info('Final Loss: %s', loss)
